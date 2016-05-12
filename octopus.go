@@ -192,8 +192,22 @@ func NewCachedWorkerPool() WorkPool {
 	pool.jobChannel = jc
 	pool.stop = sc
 	pool.poolOpen = POOLOPEN
-	ws := make([]*worker, 100)
+	ws := make([]*worker, num)
+	pool.workers = ws
+	for i:=0; i<num; i++ {
+		pool.workers[i] = newWorkerForCachedPool()
+		pool.workers[i].start(pool)
+	}
 	
+	go pool.dispatch()
+	return &pool
+}
+
+func newWorkerForChannel() chan *worker {
+	w := newWorkerForCachedPool()
+	wc := make(chan *worker)
+	wc <- w
+	return wc
 }
 
 func (pool *cachedWorkerPool) dispatch() {
@@ -202,20 +216,22 @@ func (pool *cachedWorkerPool) dispatch() {
 		case w := <- pool.workerChannel :
 			job := <- pool.jobChannel
 			w.jobChannel <- job
-		
-		case stop := <- pool.stop :
-			if stop {
-				for i := 0; i < cap(pool.workerChannel); i++ {
-					w := <- pool.workerChannel
+		case w := <- newWorkerForChannel() :
+			pool.workers = append(pool.workers, w)
+			pool.workerChannel <- w
+//		case stop := <- pool.stop :
+//			if stop {
+//				for i := 0; i < cap(pool.workerChannel); i++ {
+//					w := <- pool.workerChannel
 
-					w.stop <- true
-					<-w.stop
-				}
+//					w.stop <- true
+//					<-w.stop
+//				}
 
-				pool.stop <- true
-				return
-			}
-		}
+//				pool.stop <- true
+//				return
+//			}
+//		}
 	}
 }
 
