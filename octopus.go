@@ -231,7 +231,7 @@ func (pool *cachedWorkerPool) dispatch() {
 //				pool.stop <- true
 //				return
 //			}
-//		}
+		}
 	}
 }
 
