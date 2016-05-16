@@ -2,6 +2,7 @@
 package octopus
 
 import (
+	"math"
 	"runtime"
 	"errors"
 	"time"
@@ -23,6 +24,7 @@ const(
 	WORKERFREE uint32 = 5
 	WORKERRUNNING uint32 = 6
 	WORKERSTOP uint32 = 7
+	WORKERPREPARE uint32 = 8
 )
 
 const(
@@ -39,7 +41,7 @@ type Future interface {
 	Get() (interface{},error)
 	GetTimed(time.Duration) (interface{},error)
 	IsCancelled() bool//default 0 ,interrupt 1
-	IsDone() bool
+	Status() uint32
 }
 
 type futureTask struct {
@@ -124,22 +126,25 @@ type worker struct {
 	jobChannel chan *futureTask
 	stop chan bool
 	status uint32
+	willClose bool
 }
 func newWorker( s chan bool) *worker {
 	return &worker {
 		jobChannel : make(chan *futureTask) ,
 		stop : s ,
-		status : WORKERSTOP ,
+		status : WORKERPREPARE ,
+		willClose: false,
 	}
 }
 func newWorkerForCachedPool() *worker {
 	return &worker {
 		jobChannel : make(chan *futureTask) ,
 		stop : make(chan bool),
-		status : WORKERSTOP ,
+		status : WORKERPREPARE ,
+		willClose : false,
 	}
 }
-func (w *worker) status() {
+func (w *worker) getStatus() uint32 {
 	return atomic.LoadUint32(&w.status) 
 }
 func (w *worker) start(pool WorkPool) {
@@ -181,17 +186,20 @@ type WorkPool interface {
 type cachedWorkerPool struct {
 	*fixWorkerPool
 	workers []*worker
+	msignal chan bool
 }
 func NewCachedWorkerPool() WorkPool {
 	num := runtime.NumCPU()*20
 	wc := make(chan *worker,num )
 	jc := make(chan *futureTask, num)
 	sc := make(chan bool)
+	ms := make(chan bool)
 	var pool cachedWorkerPool
 	pool.workerChannel = wc
 	pool.jobChannel = jc
 	pool.stop = sc
 	pool.poolOpen = POOLOPEN
+	pool.msignal = ms
 	ws := make([]*worker, num)
 	pool.workers = ws
 	for i:=0; i<num; i++ {
@@ -200,37 +208,81 @@ func NewCachedWorkerPool() WorkPool {
 	}
 	
 	go pool.dispatch()
+	go pool.monitor()
 	return &pool
 }
 
-func newWorkerForChannel() chan *worker {
-	w := newWorkerForCachedPool()
-	wc := make(chan *worker)
-	wc <- w
-	return wc
+func newWorkerForChannel(pool *cachedWorkerPool, workerChannel chan *worker) chan *worker {
+	
+	if len(pool.workers) < math.MaxInt16 {
+		w := newWorkerForCachedPool()
+	          workerChannel <- w
+	}
+	
+	return workerChannel
+}
+
+func (pool *cachedWorkerPool) monitor() {
+	for {
+		select {
+			case signal := <- pool.msignal :
+				if signal {
+					return
+				}
+			default :
+				for i:=0; i<len(pool.workers); i++ {
+					w := pool.workers[i]
+					if w.getStatus() == WORKERFREE && w.willClose != true {
+						w.willClose = true
+						continue
+					}
+					
+					if w.getStatus() == WORKERSTOP && w.willClose != true {
+						w.willClose = true
+						continue
+					} 
+					
+					if w.getStatus() ==WORKERFREE && w.willClose == true {
+						w.stop <- true
+						close(w.stop)
+						close(w.jobChannel)
+						pool.workers = append(pool.workers[ : i], pool.workers[i+1 : ]...)
+					}
+					
+					if w.getStatus() == WORKERSTOP && w.willClose == true {
+						w.stop <- true
+						close(w.stop)
+						close(w.jobChannel)
+						pool.workers = append(pool.workers[ : i], pool.workers[i+1 : ]...)
+					}
+				}
+		}
+		
+	}
 }
 
 func (pool *cachedWorkerPool) dispatch() {
+	wc := make(chan *worker)
 	for {
 		select {
 		case w := <- pool.workerChannel :
 			job := <- pool.jobChannel
 			w.jobChannel <- job
-		case w := <- newWorkerForChannel() :
+		case w := <- newWorkerForChannel(pool, wc) :
 			pool.workers = append(pool.workers, w)
 			pool.workerChannel <- w
-//		case stop := <- pool.stop :
-//			if stop {
-//				for i := 0; i < cap(pool.workerChannel); i++ {
-//					w := <- pool.workerChannel
-
-//					w.stop <- true
-//					<-w.stop
-//				}
-
-//				pool.stop <- true
-//				return
-//			}
+		case stop := <- pool.stop :
+			if stop {
+				// close all workers
+				for i := 0; i < len(pool.workers); i++ {
+					pool.workers[i].stop <- true
+				}
+				//close monitor
+				pool.msignal <- true
+				
+				pool.stop <- true
+				return
+			}
 		}
 	}
 }
@@ -242,7 +294,7 @@ type fixWorkerPool struct {
 	poolOpen  uint32 // 1 represent pool open to receive jobs,0 to close
 }
 
-func newFixedWorkerPool(numWorkers int) WorkPool {
+func NewFixedWorkerPool(numWorkers int) WorkPool {
 	wc := make(chan *worker, numWorkers)
 	jc := make(chan *futureTask, numWorkers)
 	sc := make(chan bool)
@@ -254,7 +306,7 @@ func newFixedWorkerPool(numWorkers int) WorkPool {
 	}
 	
 	for i := 0; i < cap(pool.workerChannel); i++ {
-		w := newWorker(jc, sc)
+		w := newWorker(sc)
 		w.start(pool)
 	}
 	
