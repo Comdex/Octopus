@@ -2,7 +2,6 @@
 package octopus
 
 import (
-	"math"
 	"runtime"
 	"errors"
 	"time"
@@ -24,7 +23,6 @@ const(
 	WORKERFREE uint32 = 5
 	WORKERRUNNING uint32 = 6
 	WORKERSTOP uint32 = 7
-	WORKERPREPARE uint32 = 8
 )
 
 const(
@@ -37,11 +35,16 @@ type Runnable func()
 type Callable func() (interface{})
 
 type Future interface {
+	// Cancel method will set a cancel tag attempt to cancel execute job before starting this job represented by Future.
 	Cancel() error
+	// Get method can get value from Callable , if not ready it will block.
 	Get() (interface{},error)
+	// GetTimed method can get value from Callable with setting timeout.
 	GetTimed(time.Duration) (interface{},error)
+	// IsCancelled will return whether the job was setting a cancel tag, but it does not mean that the job has been terminated.
 	IsCancelled() bool//default 0 ,interrupt 1
-	Status() uint32
+	// IsDone will return whether the job was done.
+	IsDone() bool
 }
 
 type futureTask struct {
@@ -58,6 +61,8 @@ func newfutureTask(fn interface{}) *futureTask {
 			status: JOBUNSTART,
 	}
 }
+
+// free worker will call execute method
 func (f *futureTask) execute() {
 	if f.IsCancelled() {
 		return
@@ -126,25 +131,22 @@ type worker struct {
 	jobChannel chan *futureTask
 	stop chan bool
 	status uint32
-	willClose bool
 }
 func newWorker( s chan bool) *worker {
 	return &worker {
 		jobChannel : make(chan *futureTask) ,
 		stop : s ,
-		status : WORKERPREPARE ,
-		willClose: false,
+		status : WORKERSTOP ,
 	}
 }
 func newWorkerForCachedPool() *worker {
 	return &worker {
 		jobChannel : make(chan *futureTask) ,
 		stop : make(chan bool),
-		status : WORKERPREPARE ,
-		willClose : false,
+		status : WORKERSTOP ,
 	}
 }
-func (w *worker) getStatus() uint32 {
+func (w *worker) status() {
 	return atomic.LoadUint32(&w.status) 
 }
 func (w *worker) start(pool WorkPool) {
@@ -186,20 +188,17 @@ type WorkPool interface {
 type cachedWorkerPool struct {
 	*fixWorkerPool
 	workers []*worker
-	msignal chan bool
 }
 func NewCachedWorkerPool() WorkPool {
 	num := runtime.NumCPU()*20
 	wc := make(chan *worker,num )
 	jc := make(chan *futureTask, num)
 	sc := make(chan bool)
-	ms := make(chan bool)
 	var pool cachedWorkerPool
 	pool.workerChannel = wc
 	pool.jobChannel = jc
 	pool.stop = sc
 	pool.poolOpen = POOLOPEN
-	pool.msignal = ms
 	ws := make([]*worker, num)
 	pool.workers = ws
 	for i:=0; i<num; i++ {
@@ -208,81 +207,37 @@ func NewCachedWorkerPool() WorkPool {
 	}
 	
 	go pool.dispatch()
-	go pool.monitor()
 	return &pool
 }
 
-func newWorkerForChannel(pool *cachedWorkerPool, workerChannel chan *worker) chan *worker {
-	
-	if len(pool.workers) < math.MaxInt16 {
-		w := newWorkerForCachedPool()
-	          workerChannel <- w
-	}
-	
-	return workerChannel
-}
-
-func (pool *cachedWorkerPool) monitor() {
-	for {
-		select {
-			case signal := <- pool.msignal :
-				if signal {
-					return
-				}
-			default :
-				for i:=0; i<len(pool.workers); i++ {
-					w := pool.workers[i]
-					if w.getStatus() == WORKERFREE && w.willClose != true {
-						w.willClose = true
-						continue
-					}
-					
-					if w.getStatus() == WORKERSTOP && w.willClose != true {
-						w.willClose = true
-						continue
-					} 
-					
-					if w.getStatus() ==WORKERFREE && w.willClose == true {
-						w.stop <- true
-						close(w.stop)
-						close(w.jobChannel)
-						pool.workers = append(pool.workers[ : i], pool.workers[i+1 : ]...)
-					}
-					
-					if w.getStatus() == WORKERSTOP && w.willClose == true {
-						w.stop <- true
-						close(w.stop)
-						close(w.jobChannel)
-						pool.workers = append(pool.workers[ : i], pool.workers[i+1 : ]...)
-					}
-				}
-		}
-		
-	}
+func newWorkerForChannel() chan *worker {
+	w := newWorkerForCachedPool()
+	wc := make(chan *worker)
+	wc <- w
+	return wc
 }
 
 func (pool *cachedWorkerPool) dispatch() {
-	wc := make(chan *worker)
 	for {
 		select {
 		case w := <- pool.workerChannel :
 			job := <- pool.jobChannel
 			w.jobChannel <- job
-		case w := <- newWorkerForChannel(pool, wc) :
+		case w := <- newWorkerForChannel() :
 			pool.workers = append(pool.workers, w)
 			pool.workerChannel <- w
-		case stop := <- pool.stop :
-			if stop {
-				// close all workers
-				for i := 0; i < len(pool.workers); i++ {
-					pool.workers[i].stop <- true
-				}
-				//close monitor
-				pool.msignal <- true
-				
-				pool.stop <- true
-				return
-			}
+//		case stop := <- pool.stop :
+//			if stop {
+//				for i := 0; i < cap(pool.workerChannel); i++ {
+//					w := <- pool.workerChannel
+
+//					w.stop <- true
+//					<-w.stop
+//				}
+
+//				pool.stop <- true
+//				return
+//			}
 		}
 	}
 }
@@ -294,7 +249,8 @@ type fixWorkerPool struct {
 	poolOpen  uint32 // 1 represent pool open to receive jobs,0 to close
 }
 
-func NewFixedWorkerPool(numWorkers int) WorkPool {
+// Create a goroutine pool that can be reused for a number of fixed goroutines
+func newFixedWorkerPool(numWorkers int) WorkPool {
 	wc := make(chan *worker, numWorkers)
 	jc := make(chan *futureTask, numWorkers)
 	sc := make(chan bool)
@@ -306,7 +262,7 @@ func NewFixedWorkerPool(numWorkers int) WorkPool {
 	}
 	
 	for i := 0; i < cap(pool.workerChannel); i++ {
-		w := newWorker(sc)
+		w := newWorker(jc, sc)
 		w.start(pool)
 	}
 	
