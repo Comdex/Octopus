@@ -1,8 +1,18 @@
 # Octopus
 
-Octopus is a golang library for managing a groutine pool that can dynamic adjust the number of goroutine, the api is a bit like java concurrent pool api.
+Octopus is a golang library for managing a goroutine pool that can dynamic adjust the number of goroutine, the api is a bit like java concurrent pool api.
 
 Octopus can new a pool to submit Callable job or Runnable job, Callable job is a function with a interface{} return value and no arguments, Runnable job is a function without arguments and return value, a job will be allocated to a worker when it becomes available.
+
+## Features
+1. dynamic adjust the number of goroutine according the idle of goroutine
+2. support synchronous and asynchronous to get calculating result
+3. support timeout to get calculating result
+4. support to get status of a job
+5. can drop jobs when pool is busy
+6. automatic recovery from a job's  panic
+7. can set a log function to record pool's log infos
+8. the api is a bit like java concurrent pool and more easily to use
 
 ## Docs
 https://godoc.org/github.com/Comdex/octopus
