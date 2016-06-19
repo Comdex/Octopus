@@ -35,10 +35,15 @@ type Runnable func()
 type Callable func() (interface{})
 
 type Future interface {
+	// Cancel method will set a cancel tag attempt to cancel execute job before starting this job represented by Future.
 	Cancel() error
+	// Get method can get value from Callable , if not ready it will block.
 	Get() (interface{},error)
+	// GetTimed method can get value from Callable with setting timeout.
 	GetTimed(time.Duration) (interface{},error)
+	// IsCancelled will return whether the job was setting a cancel tag, but it does not mean that the job has been terminated.
 	IsCancelled() bool//default 0 ,interrupt 1
+	// IsDone will return whether the job was done.
 	IsDone() bool
 }
 
@@ -56,6 +61,8 @@ func newfutureTask(fn interface{}) *futureTask {
 			status: JOBUNSTART,
 	}
 }
+
+// free worker will call execute method
 func (f *futureTask) execute() {
 	if f.IsCancelled() {
 		return
@@ -242,6 +249,7 @@ type fixWorkerPool struct {
 	poolOpen  uint32 // 1 represent pool open to receive jobs,0 to close
 }
 
+// Create a goroutine pool that can be reused for a number of fixed goroutines
 func newFixedWorkerPool(numWorkers int) WorkPool {
 	wc := make(chan *worker, numWorkers)
 	jc := make(chan *futureTask, numWorkers)
