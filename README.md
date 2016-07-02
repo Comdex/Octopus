@@ -53,7 +53,7 @@ func main() {
 		s := "test callable var"
 		return 
 	}
-	pool.SubmitCallable(s)
+	pool.SubmitCallable(c)
 	
 	pool.SubmitRunnable(func(){
 		fmt.Println("test1")
